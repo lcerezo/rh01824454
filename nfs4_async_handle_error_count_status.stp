@@ -1,0 +1,67 @@
+#!/usr/bin/stap
+#
+# Simple / naive attempt at detecting an NFS4 infinite loop
+#
+# This script counts the number of times that nfs4_async_handle_error is called
+# and rpc_task.tk_status equals a specific NFS4 error code (such as NFS4ERR_BAD_STATEID)
+# 
+# If we get a lot of calls to nfs4_async_handle_error in a short period of
+# time and with the same non-zero error code, detect this and print a warning to syslog.
+#
+# Otherwise just print out a summary of the calls to nfs4_async_handle_error completing
+# with a specific error code.
+#
+# Tested on RHEL5 - RHEL7 kernels
+# RHEL5: 2.6.18-371.6.1.el5
+# RHEL6: 2.6.32-358.*.el6 - 2.6.32-504.*el6
+# RHEL7: 3.10.0-229.el7
+#
+global nfs4_async_handle_error_current
+global nfs4_async_handle_error_last
+# Based on the tcpdump, we got over 1,000 WRITEs completing in an error in 1 second
+global thresh = 10000
+
+%( kernel_v < "3.6.0" %? 
+probe module("nfs").function("nfs4_async_handle_error")
+%)
+%( kernel_v >= "3.6.0" %? 
+probe module("nfsv4").function("nfs4_async_handle_error")
+%)
+{
+# Filter out 'success' statuses - this routine gets called unconditionally on write completion
+	if ($task->tk_status < 0) {
+		nfs4_async_handle_error_current[$task->tk_status]++
+	}
+}
+
+probe timer.ms(10000)
+{
+        printf("Summary of calls to nfs4_async_handle_error at %s\n", tz_ctime(gettimeofday_s()));
+	foreach (e in nfs4_async_handle_error_current)
+	{
+		count = nfs4_async_handle_error_current[e] - nfs4_async_handle_error_last[e];
+		if (count > 0) {
+			message = sprintf("- completed with status %d %d times\n", e, count);
+			printf("%s", message);
+		}
+		if (count > thresh) {
+			message = sprintf("WARNING: Possible NFS4 client infinite loop detected: nfs4_async_handle_error completed with error code %d %d times in 10 seconds - will lead to 'blocked for more than' messages\n", e, count);
+			printk(1, message);
+			printf("%s", message);
+		}
+		nfs4_async_handle_error_last[e] = nfs4_async_handle_error_current[e];
+	}
+}
+
+probe begin {
+	message = sprintf("systemtap started at %s - looking for %d calls to nfs4_async_handle_error in 10 seconds, and counting return codes\n", tz_ctime(gettimeofday_s()), thresh);
+	printk(1, message);
+	printf("%s", message);
+}
+probe end {
+        message = sprintf("systemtap stopped at %s\n", tz_ctime(gettimeofday_s()));
+	printk(1, message);
+	printf("%s", message);
+}
+
+
