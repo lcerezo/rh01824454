@@ -59,7 +59,7 @@ stap_cmdline="nohup stap -g -v $stap_script"
 ## -------- END SETUP ---------
 
 # NOTE: We could accept a DNS name but then we'd need to convert to IP
-if [[ $nfs_server =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+if [[ $nfs_server =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}.*$ ]]; then
         echo "Found valid IP address $nfs_server for NFS server"
 else
     	echo "Could not validate $nfs_server as an IP of NFS server"
@@ -97,7 +97,7 @@ echo "Using tcpdump interface $interface for capture"
 # The tcpdump command creates a circular buffer of -W X dump files -C YM in size (in MB).
 # The default value is 1 file, 1024M in size, it is recommended to modify the buffer values
 # depending on the capture window needed.
-tcpdump="tcpdump -s0 -i $interface host $nfs_server -W 1 -C 1024M -w $tcpdump_output -Z root"
+tcpdump="tcpdump -s0 -i $interface net $nfs_server -W 1 -C 1024M -w $tcpdump_output -Z root"
 echo $tcpdump
 
 $tcpdump &
