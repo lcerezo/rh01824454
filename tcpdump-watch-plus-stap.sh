@@ -54,7 +54,7 @@ match="infinite loop"
 wait="2"
 
 # Systemtap script name and cmdline
-stap_cmdline="nohup stap -g -v $stap_script" 
+stap_cmdline="nohup stap --all-modules -g -v $stap_script" 
 
 ## -------- END SETUP ---------
 
@@ -79,6 +79,8 @@ copy_nfs_files $output_dir "begin"
 
 echo Copying $log to $output_dir/$(basename $log).begin
 cp $log $output_dir/$(basename $log).begin
+echo Copying /var/log/messages to $output_dir/messages.begin
+cp /var/log/messages $output_dir/messages.begin
 
 # Interface to gather tcpdump, derived based on the IP address of the NFS server
 # NOTE: To prevent BZ 972396 we need to specify the interface by interface number
@@ -127,6 +129,8 @@ echo Copying $log to $output_dir/$(basename $log).end
 cp $log $output_dir/$(basename $log).end
 echo Copying nohup.out to $output_dir/$stap_script-nohup.out
 cp nohup.out $output_dir/$stap_script-nohup.out
+echo Copying /var/log/messages to $output_dir/messages.end
+cp /var/log/messages $output_dir/messages.end
 
 if [ -e /bin/gzip ]; then
         echo Gzipping $tcpdump_output

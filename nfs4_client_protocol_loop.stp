@@ -1,0 +1,255 @@
+#!/usr/bin/stap
+#
+# The intent of this script is for troubleshooting NFS4 client protocol loops.
+# It is based on nfs4_async_handle_error_count_status.stp
+#
+# This script counts the number of times the NFS4 client's error routines are called
+# and rpc_task.tk_status equals a specific NFS4 error code (such as NFS4ERR_BAD_STATEID)
+# The specific routines checked are:
+# - nfs4_handle_exception
+# - nfs4_async_handle_error
+# 
+# If we get a lot of calls to the above in a short period of
+# time and with the same non-zero error code, detect this and print a warning to syslog.
+#
+# Otherwise just print out a summary of the calls to the routines completing
+# with a specific error code.
+#
+# Tested on the following kernels
+# RHEL6: 2.6.32-696.el6
+#
+global nfs4_async_handle_error_current
+global nfs4_async_handle_error_last
+global nfs4_handle_exception_current
+global nfs4_handle_exception_last
+# Define frequency of a "NFS4 protocol loop"
+global thresh = 200
+global period_s = 2
+
+probe module("nfsv4").function("nfs4_async_handle_error")
+{
+# Filter out 'success' statuses - this routine gets called unconditionally on write completion
+	if ($task->tk_status < 0) {
+		nfs4_async_handle_error_current[$task->tk_status]++
+	}
+}
+probe module("nfsv4").function("nfs4_handle_exception")
+{
+# Filter out 'success' statuses - this routine gets called unconditionally on write completion
+# Filter out 'ENOENT' (-2) status since this happens often under normal operation
+	if ($errorcode < 0 && $errorcode != -2) {
+		nfs4_handle_exception_current[$errorcode]++
+	}
+}
+
+probe timer.ms(2000)
+{
+        printf("Summary of calls to nfs4_async_handle_error at %s\n", tz_ctime(gettimeofday_s()));
+	foreach (e in nfs4_async_handle_error_current)
+	{
+		count = nfs4_async_handle_error_current[e] - nfs4_async_handle_error_last[e];
+		if (count > 0) {
+			message = sprintf("- completed with status %d %d times\n", e, count);
+			printf("%s", message);
+		}
+		if (count > thresh) {
+			message = sprintf("WARNING: Possible NFS4 client infinite loop detected: nfs4_async_handle_error completed with error code %d %d times in %d seconds - will lead to 'blocked for more than' messages\n", e, count, period_s);
+			printk(1, message);
+			printf("%s", message);
+		}
+		nfs4_async_handle_error_last[e] = nfs4_async_handle_error_current[e];
+	}
+        printf("Summary of calls to nfs4_handle_exception at %s\n", tz_ctime(gettimeofday_s()));
+	foreach (e in nfs4_handle_exception_current)
+	{
+		count = nfs4_handle_exception_current[e] - nfs4_handle_exception_last[e];
+		if (count > 0) {
+			message = sprintf("- completed with status %d %d times\n", e, count);
+			printf("%s", message);
+		}
+		if (count > thresh) {
+			message = sprintf("WARNING: Possible NFS4 client infinite loop detected: nfs4_handle_exception completed with error code %d %d times in %d seconds - will lead to 'blocked for more than' messages\n", e, count, period_s);
+			printk(1, message);
+			printf("%s", message);
+		}
+		nfs4_handle_exception_last[e] = nfs4_handle_exception_current[e];
+	}
+}
+
+@define offsetof(type, member) %(
+    ( & @cast(0, @type) -> @member )
+%)
+
+@define module_offsetof(module, type, member) %(
+    ( & @cast(0, @type, @module) -> @member )
+%)
+@define container_of(ptr, type, member) %(
+    @cast(@ptr - @offsetof(@type, @member), @type)
+%)
+
+@define module_container_of(ptr, module, type, member) %(
+    @cast(@ptr - @module_offsetof(@module, @type, @member), @type, @module)
+%)
+
+@define list_next(l) %( @l ? @cast(@l, "struct list_head")->next : 0 %)
+function list_len:long(head:long) {
+        len = 0
+        if (head) {
+                n = @list_next(head) ; last = 0
+                while (n && n != head && n != last) {
+                        len++ ; last = n ; n = @list_next(n)
+                }
+        }
+        return len
+}
+
+%{
+enum {
+NFS4_INVALID_STATEID_TYPE = 0,
+NFS4_SPECIAL_STATEID_TYPE,
+NFS4_OPEN_STATEID_TYPE,
+NFS4_LOCK_STATEID_TYPE,
+NFS4_DELEGATION_STATEID_TYPE,
+NFS4_LAYOUT_STATEID_TYPE,
+NFS4_PNFS_DS_STATEID_TYPE,
+};
+%}
+
+function nfs4_stateid_type_str:string(type:long)
+%{
+        unsigned long type = (unsigned long)STAP_ARG_type;
+        int len;
+        STAP_RETVALUE[0] = '\0';
+        if (type == NFS4_INVALID_STATEID_TYPE)
+                strlcat(STAP_RETVALUE, "NFS4_INVALID_STATEID_TYPE", MAXSTRINGLEN);
+        if (type == NFS4_SPECIAL_STATEID_TYPE)
+                strlcat(STAP_RETVALUE, "NFS4_SPECIAL_STATEID_TYPE", MAXSTRINGLEN);
+        if (type == NFS4_OPEN_STATEID_TYPE)
+                strlcat(STAP_RETVALUE, "NFS4_OPEN_STATEID_TYPE", MAXSTRINGLEN);
+        if (type == NFS4_LOCK_STATEID_TYPE)
+                strlcat(STAP_RETVALUE, "NFS4_LOCK_STATEID_TYPE", MAXSTRINGLEN);
+        if (type == NFS4_DELEGATION_STATEID_TYPE)
+                strlcat(STAP_RETVALUE, "NFS4_DELEGATION_STATEID_TYPE", MAXSTRINGLEN);
+        if (type == NFS4_LAYOUT_STATEID_TYPE)
+                strlcat(STAP_RETVALUE, "NFS4_LAYOUT_STATEID_TYPE", MAXSTRINGLEN);
+        if (type == NFS4_PNFS_DS_STATEID_TYPE)
+                strlcat(STAP_RETVALUE, "NFS4_PNFS_DS_STATEID_TYPE", MAXSTRINGLEN);
+        len = strlen(STAP_RETVALUE);
+        if (len)
+                STAP_RETVALUE[len -1] = '\0';
+        else
+                strlcat(STAP_RETVALUE, "0", MAXSTRINGLEN);
+%}
+
+function print_nfs4_stateid(name:string, s:long)
+{
+	type = @cast(s, "nfs4_stateid", "nfsv4")->type;
+	seqid = @cast(s, "nfs4_stateid", "nfsv4")->seqid;
+	printf("- %s nfs4_stateid = 0x%p (type = %s seqid = 0x%08x", name, s, nfs4_stateid_type_str(type), seqid);
+	for (i = 0; i < 12; i++) {
+		other = @cast(s, "nfs4_stateid", "nfsv4")->other[i];
+		if (i == 0)
+			printf(" other = %02x", 0x00ff & other);
+		else
+			printf(":%02x", 0x00ff & other);
+	}
+	printf(")\n");
+}
+
+function print_nfs4_state(s:long)
+{
+	current_stid = &@cast(s, "nfs4_state", "nfsv4")->stateid;
+	open_stid = &@cast(s, "nfs4_state", "nfsv4")->open_stateid;
+	print_nfs4_stateid("current_stateid", current_stid);
+	print_nfs4_stateid("open_stateid", open_stid);
+}
+
+global MAX_NFS4_STATES = 50
+# print out the list of nfs4_states associated with this state owner
+function print_nfs4_states_from_state_owner(so:long)
+{
+	states = &@cast(so, "struct nfs4_state_owner", "nfsv4")->so_states;
+	printf("printing a max of %d states of %d total states for state owner %p\n", MAX_NFS4_STATES, list_len(states), so);
+	states_next = &@cast(so, "struct nfs4_state_owner", "nfsv4")->so_states->next;
+	n = states_next;
+	i = 0;
+	while (@cast(n, "list_head")->next != states_next && i < MAX_NFS4_STATES) {
+		n = @cast(n, "list_head")->next;
+		state = &@module_container_of(n, "nfsv4", "struct nfs4_state", open_states);
+		printf("(struct nfs4_state *)0x%p\n", state);
+		print_nfs4_state(state);
+		i++;
+	}
+}
+
+#
+# Check for NFS4ERR_BAD_SEQID (10026) dropping state owner, which can lead to NFS4 protocol loop as
+# described in commit 86cfb0418537460baf0de0b5e9253784be27a6f9
+# If we hit this probe and drop the state owner, then try to re-use the same state owner, we'll infinite loop
+#
+probe module("nfsv4").function("nfs_increment_open_seqid").call
+{
+	if ($seqid == NULL) {
+		next;
+	}
+	sp = &@module_container_of($seqid->sequence, "nfsv4", "struct nfs4_state_owner", so_seqid)
+	if ($status == -10026) {
+		printf("%s called with status == NFS4ERR_BAD_SEQID (-10026): WARNING calling nfs4_drop_state_owner %p on seqid.owner_id = 0x%x flags = 0x%x counter = 0x%x\n", ppfunc(), sp, $seqid->sequence->owner_id, $seqid->sequence->flags, $seqid->sequence->counter);
+		print_nfs4_states_from_state_owner(sp)
+		print_backtrace();
+	}
+}
+
+#
+# This is a second method where a state owner can be removed, and hence any nfs4_state associated is tossed
+# If for some reason this is called but there are still outstanding NFS4 ops that complete with a retryable error,
+# the state manager will run but won't do anything and we will most likely be in a protocol loop.
+#
+probe module("nfsv4").function("nfs4_remove_state_owner_locked").call
+{
+	printf("%s called: WARNING removing nfs4_state_owner %p and dropping all nfs4_states associated!\n", ppfunc(), $sp);
+	print_nfs4_states_from_state_owner($sp)
+}
+
+#
+# Check for nfs4 state manager scheduling
+#
+probe module("nfsv4").function("nfs4_schedule_stateid_recovery"),
+module("nfsv4").function("nfs4_state_mark_reclaim_reboot"),
+module("nfsv4").function("nfs4_open_reclaim"),
+module("nfsv4").function("nfs4_lock_reclaim"),
+module("nfsv4").function("nfs4_open_expired"),
+module("nfsv4").function("nfs4_lock_expired"),
+module("nfsv4").function("nfs4_handle_delegation_recall_error")
+{
+	printf("%s called with nfs4_state = %p\n", ppfunc(), $state)
+	print_nfs4_state($state);
+}
+probe module("nfsv4").function("nfs4_schedule_stateid_recovery").return,
+module("nfsv4").function("nfs4_state_mark_reclaim_reboot").return,
+module("nfsv4").function("nfs4_open_reclaim").return,
+module("nfsv4").function("nfs4_lock_reclaim").return,
+module("nfsv4").function("nfs4_lock_expired").return,
+module("nfsv4").function("nfs4_handle_delegation_recall_error").return
+{
+	if (@defined($return) && $return != 0)
+		printf("%s called with nfs4_state = %p returning with %d\n", ppfunc(), $state, $return)
+}
+probe module("nfsv4").function("nfs4_state_mark_open_context_bad")
+{
+	printf("%s called with nfs4_state = %p\n", ppfunc(), $state)
+	print_nfs4_state($state);
+}
+
+probe begin {
+	message = sprintf("systemtap started at %s - looking for %d calls to %s in %d seconds, and counting return codes\n", tz_ctime(gettimeofday_s()), thresh, "nfs4_handle_exception and nfs4_async_handle_error", period_s);
+	printk(1, message);
+	printf("%s", message);
+}
+probe end {
+        message = sprintf("systemtap stopped at %s\n", tz_ctime(gettimeofday_s()));
+	printk(1, message);
+	printf("%s", message);
+}
+
+
